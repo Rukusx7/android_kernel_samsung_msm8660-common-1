@@ -154,9 +154,7 @@ static struct dbs_tuners {
 	.ignore_nice = 1,
 	.powersave_bias = 1,
 	.freq_boost_time = DEFAULT_FREQ_BOOST_TIME,
-	.boostfreq = MAX_FREQ_LIMIT,
-	.sync_freq = 0,
-	.optimal_freq = 0,
+	.boostfreq = DEFAULT_FREQ_BOOST_TIME,
 };
 
 static inline cputime64_t get_cpu_idle_time_jiffy(unsigned int cpu,
