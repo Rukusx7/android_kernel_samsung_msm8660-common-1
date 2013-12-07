@@ -25,7 +25,6 @@
 #ifndef V4L2_INT_DEVICE_H
 #define V4L2_INT_DEVICE_H
 
-#include <linux/module.h>
 #include <media/v4l2-common.h>
 
 #define V4L2NAMESIZE 32
@@ -40,6 +39,8 @@ enum v4l2_int_type {
 	v4l2_int_type_master = 1,
 	v4l2_int_type_slave
 };
+
+struct module;
 
 struct v4l2_int_device;
 
@@ -219,8 +220,6 @@ enum v4l2_int_ioctl_num {
 	vidioc_int_reset_num,
 	/* VIDIOC_INT_INIT */
 	vidioc_int_init_num,
-	/* VIDIOC_DBG_G_CHIP_IDENT */
-	vidioc_int_g_chip_ident_num,
 
 	/*
 	 *
@@ -302,6 +301,5 @@ V4L2_INT_WRAPPER_1(enum_frameintervals, struct v4l2_frmivalenum, *);
 
 V4L2_INT_WRAPPER_0(reset);
 V4L2_INT_WRAPPER_0(init);
-V4L2_INT_WRAPPER_1(g_chip_ident, int, *);
 
 #endif

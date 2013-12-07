@@ -72,6 +72,7 @@ FILELINE * docsection;
 #define FUNCTION      "-function"
 #define NOFUNCTION    "-nofunction"
 #define NODOCSECTIONS "-no-doc-sections"
+#define SHOWNOTFOUND  "-show-not-found"
 
 static char *srctree, *kernsrctree;
 
@@ -205,8 +206,7 @@ static void find_export_symbols(char * filename)
 				PATH_MAX - strlen(real_filename));
 		sym = add_new_file(filename);
 		fp = fopen(real_filename, "r");
-		if (fp == NULL)
-		{
+		if (fp == NULL)	{
 			fprintf(stderr, "docproc: ");
 			perror(real_filename);
 			exit(1);
@@ -295,6 +295,7 @@ static void singfunc(char * filename, char * line)
         int startofsym = 1;
 	vec[idx++] = KERNELDOC;
 	vec[idx++] = DOCBOOK;
+	vec[idx++] = SHOWNOTFOUND;
 
         /* Split line up in individual parameters preceded by FUNCTION */
         for (i=0; line[i]; i++) {
@@ -326,7 +327,8 @@ static void singfunc(char * filename, char * line)
  */
 static void docsect(char *filename, char *line)
 {
-	char *vec[6]; /* kerneldoc -docbook -function "section" file NULL */
+	/* kerneldoc -docbook -show-not-found -function "section" file NULL */
+	char *vec[7];
 	char *s;
 
 	for (s = line; *s; s++)
@@ -342,10 +344,11 @@ static void docsect(char *filename, char *line)
 
 	vec[0] = KERNELDOC;
 	vec[1] = DOCBOOK;
-	vec[2] = FUNCTION;
-	vec[3] = line;
-	vec[4] = filename;
-	vec[5] = NULL;
+	vec[2] = SHOWNOTFOUND;
+	vec[3] = FUNCTION;
+	vec[4] = line;
+	vec[5] = filename;
+	vec[6] = NULL;
 	exec_kernel_doc(vec);
 }
 
@@ -487,8 +490,7 @@ static void parse_file(FILE *infile)
 				default:
 					defaultline(line);
 			}
-		}
-		else {
+		} else {
 			defaultline(line);
 		}
 	}
@@ -519,8 +521,7 @@ int main(int argc, char *argv[])
                 exit(2);
         }
 
-	if (strcmp("doc", argv[1]) == 0)
-	{
+	if (strcmp("doc", argv[1]) == 0) {
 		/* Need to do this in two passes.
 		 * First pass is used to collect all symbols exported
 		 * in the various files;
@@ -556,9 +557,7 @@ int main(int argc, char *argv[])
 			fprintf(stderr, "Warning: didn't use docs for %s\n",
 				all_list[i]);
 		}
-	}
-	else if (strcmp("depend", argv[1]) == 0)
-	{
+	} else if (strcmp("depend", argv[1]) == 0) {
 		/* Create first part of dependency chain
 		 * file.tmpl */
 		printf("%s\t", argv[2]);
@@ -571,9 +570,7 @@ int main(int argc, char *argv[])
 		findall           = adddep;
 		parse_file(infile);
 		printf("\n");
-	}
-	else
-	{
+	} else {
 		fprintf(stderr, "Unknown option: %s\n", argv[1]);
 		exit(1);
 	}

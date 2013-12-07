@@ -5,7 +5,7 @@
 #include <linux/threads.h>
 #include <asm/irq.h>
 
-#define NR_IPI	7
+#define NR_IPI	8
 
 typedef struct {
 	unsigned int __softirq_pending;
@@ -26,14 +26,6 @@ u64 smp_irq_stat_cpu(unsigned int cpu);
 #endif
 
 #define arch_irq_stat_cpu	smp_irq_stat_cpu
-
-#if NR_IRQS > 512
-#define HARDIRQ_BITS	10
-#elif NR_IRQS > 256
-#define HARDIRQ_BITS	9
-#else
-#define HARDIRQ_BITS	8
-#endif
 
 #define __ARCH_IRQ_EXIT_IRQS_DISABLED	1
 

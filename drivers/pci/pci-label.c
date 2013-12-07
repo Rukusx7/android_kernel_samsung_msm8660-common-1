@@ -55,7 +55,7 @@ enum smbios_attr_enum {
 	SMBIOS_ATTR_INSTANCE_SHOW,
 };
 
-static mode_t
+static size_t
 find_smbios_instance_string(struct pci_dev *pdev, char *buf,
 			    enum smbios_attr_enum attribute)
 {
@@ -89,7 +89,7 @@ find_smbios_instance_string(struct pci_dev *pdev, char *buf,
 	return 0;
 }
 
-static mode_t
+static umode_t
 smbios_instance_string_exist(struct kobject *kobj, struct attribute *attr,
 			     int n)
 {
@@ -263,7 +263,7 @@ device_has_dsm(struct device *dev)
 	acpi_handle handle;
 	struct acpi_buffer output = {ACPI_ALLOCATE_BUFFER, NULL};
 
-	handle = DEVICE_ACPI_HANDLE(dev);
+	handle = ACPI_HANDLE(dev);
 
 	if (!handle)
 		return FALSE;
@@ -275,7 +275,7 @@ device_has_dsm(struct device *dev)
 	return FALSE;
 }
 
-static mode_t
+static umode_t
 acpi_index_string_exist(struct kobject *kobj, struct attribute *attr, int n)
 {
 	struct device *dev;
@@ -295,7 +295,7 @@ acpilabel_show(struct device *dev, struct device_attribute *attr, char *buf)
 	acpi_handle handle;
 	int length;
 
-	handle = DEVICE_ACPI_HANDLE(dev);
+	handle = ACPI_HANDLE(dev);
 
 	if (!handle)
 		return -1;
@@ -316,7 +316,7 @@ acpiindex_show(struct device *dev, struct device_attribute *attr, char *buf)
 	acpi_handle handle;
 	int length;
 
-	handle = DEVICE_ACPI_HANDLE(dev);
+	handle = ACPI_HANDLE(dev);
 
 	if (!handle)
 		return -1;

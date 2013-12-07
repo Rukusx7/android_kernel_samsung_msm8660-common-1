@@ -41,8 +41,8 @@ static inline s32 nfhd_read_write(u32 major, u32 minor, u32 rwflag, u32 recno,
 static inline s32 nfhd_get_capacity(u32 major, u32 minor, u32 *blocks,
 				    u32 *blocksize)
 {
-	return nf_call(nfhd_id + NFHD_GET_CAPACITY, major, minor, blocks,
-		       blocksize);
+	return nf_call(nfhd_id + NFHD_GET_CAPACITY, major, minor,
+		       virt_to_phys(blocks), virt_to_phys(blocksize));
 }
 
 static LIST_HEAD(nfhd_list);
@@ -59,7 +59,7 @@ struct nfhd_device {
 	struct gendisk *disk;
 };
 
-static int nfhd_make_request(struct request_queue *queue, struct bio *bio)
+static void nfhd_make_request(struct request_queue *queue, struct bio *bio)
 {
 	struct nfhd_device *dev = queue->queuedata;
 	struct bio_vec *bvec;
@@ -76,7 +76,6 @@ static int nfhd_make_request(struct request_queue *queue, struct bio *bio)
 		sec += len;
 	}
 	bio_endio(bio, 0);
-	return 0;
 }
 
 static int nfhd_getgeo(struct block_device *bdev, struct hd_geometry *geo)

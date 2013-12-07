@@ -7,27 +7,19 @@
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 2 of the License, or
  * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #include <linux/errno.h>
 #include <linux/slab.h>
 #include <linux/kernel.h>
+#include <linux/module.h>
 #include <linux/list.h>
 #include <linux/string.h>
 #include <linux/device.h>
 
 #include <linux/usb/ch9.h>
 #include <linux/usb/gadget.h>
-
+#include <linux/usb/composite.h>
 
 /**
  * usb_descriptor_fillbuf - fill buffer with descriptors
@@ -62,7 +54,7 @@ usb_descriptor_fillbuf(void *buf, unsigned buflen,
 	}
 	return dest - (u8 *)buf;
 }
-
+EXPORT_SYMBOL_GPL(usb_descriptor_fillbuf);
 
 /**
  * usb_gadget_config_buf - builts a complete configuration descriptor
@@ -115,6 +107,7 @@ int usb_gadget_config_buf(
 	cp->bmAttributes |= USB_CONFIG_ATT_ONE;
 	return len;
 }
+EXPORT_SYMBOL_GPL(usb_gadget_config_buf);
 
 /**
  * usb_copy_descriptors - copy a vector of USB descriptors
@@ -164,136 +157,41 @@ usb_copy_descriptors(struct usb_descriptor_header **src)
 
 	return ret;
 }
+EXPORT_SYMBOL_GPL(usb_copy_descriptors);
 
-/**
- * usb_find_endpoint - find a copy of an endpoint descriptor
- * @src: original vector of descriptors
- * @copy: copy of @src
- * @match: endpoint descriptor found in @src
- *
- * This returns the copy of the @match descriptor made for @copy.  Its
- * intended use is to help remembering the endpoint descriptor to use
- * when enabling a given endpoint.
- */
-struct usb_endpoint_descriptor *
-usb_find_endpoint(
-	struct usb_descriptor_header **src,
-	struct usb_descriptor_header **copy,
-	struct usb_endpoint_descriptor *match
-)
+int usb_assign_descriptors(struct usb_function *f,
+		struct usb_descriptor_header **fs,
+		struct usb_descriptor_header **hs,
+		struct usb_descriptor_header **ss)
 {
-	while (*src) {
-		if (*src == (void *) match)
-			return (void *)*copy;
-		src++;
-		copy++;
+	struct usb_gadget *g = f->config->cdev->gadget;
+
+	if (fs) {
+		f->fs_descriptors = usb_copy_descriptors(fs);
+		if (!f->fs_descriptors)
+			goto err;
 	}
-	return NULL;
-}
-
-#ifdef CONFIG_USB_ANDROID_SAMSUNG_COMPOSITE
-/**
- * usb_find_descriptor - find a copy of an descriptor header
- * @src: original vector of descriptors
- * @copy: copy of @src
- * @match: descriptor found in @src
- *
- * This returns the copy of the @match descriptor made for @copy.  Its
- * intended use is to help remembering the interface descriptor to use
- * when changing a interface.
- */
-struct usb_descriptor_header *
-usb_find_descriptor_header(
-	struct usb_descriptor_header **src,
-	struct usb_descriptor_header **copy,
-	struct usb_descriptor_header *match
-)
-{
-	while (*src) {
-		if (*src == (void *) match)
-			return (void *)*copy;
-		src++;
-		copy++;
+	if (hs && gadget_is_dualspeed(g)) {
+		f->hs_descriptors = usb_copy_descriptors(hs);
+		if (!f->hs_descriptors)
+			goto err;
 	}
-	return NULL;
-}
-
-int usb_change_interface_num(
-	struct usb_descriptor_header **src,
-	struct usb_descriptor_header **copy,
-	struct usb_interface_descriptor *match,
-	int num)
-{
-	struct usb_descriptor_header *find_desc = NULL;
-
-	find_desc = usb_find_descriptor_header(
-		src, copy, (struct usb_descriptor_header *)match);
-	if (find_desc) {
-		((struct usb_interface_descriptor *)find_desc)
-		    ->bInterfaceNumber = num;
-		return 1;
+	if (ss && gadget_is_superspeed(g)) {
+		f->ss_descriptors = usb_copy_descriptors(ss);
+		if (!f->ss_descriptors)
+			goto err;
 	}
 	return 0;
+err:
+	usb_free_all_descriptors(f);
+	return -ENOMEM;
 }
+EXPORT_SYMBOL_GPL(usb_assign_descriptors);
 
-int usb_change_iad_num(
-	struct usb_descriptor_header **src,
-	struct usb_descriptor_header **copy,
-	struct usb_interface_assoc_descriptor *match,
-	int num)
+void usb_free_all_descriptors(struct usb_function *f)
 {
-	struct usb_descriptor_header *find_desc = NULL;
-
-	find_desc = usb_find_descriptor_header(
-		src, copy, (struct usb_descriptor_header *)match);
-	if (find_desc) {
-		((struct usb_interface_assoc_descriptor *)find_desc)
-		    ->bFirstInterface = num;
-		return 1;
-	}
-	return 0;
+	usb_free_descriptors(f->fs_descriptors);
+	usb_free_descriptors(f->hs_descriptors);
+	usb_free_descriptors(f->ss_descriptors);
 }
-
-int usb_change_cdc_union_num(
-	struct usb_descriptor_header **src,
-	struct usb_descriptor_header **copy,
-	struct usb_cdc_union_desc *match,
-	int num,
-	int master)
-{
-	struct usb_descriptor_header *find_desc = NULL;
-
-	find_desc = usb_find_descriptor_header(
-		src, copy, (struct usb_descriptor_header *)match);
-	if (find_desc) {
-		if (master) {
-			((struct usb_cdc_union_desc *)find_desc)
-			    ->bMasterInterface0 = num;
-		} else {
-			((struct usb_cdc_union_desc *)find_desc)
-			    ->bSlaveInterface0 = num;
-		}
-		return 1;
-	}
-	return 0;
-}
-
-int usb_change_cdc_call_mgmt_num(
-	struct usb_descriptor_header **src,
-	struct usb_descriptor_header **copy,
-	struct usb_cdc_call_mgmt_descriptor *match,
-	int num)
-{
-	struct usb_descriptor_header *find_desc = NULL;
-
-	find_desc = usb_find_descriptor_header(
-		src, copy, (struct usb_descriptor_header *)match);
-	if (find_desc) {
-		((struct usb_cdc_call_mgmt_descriptor *)find_desc)
-		    ->bDataInterface = num;
-		return 1;
-	}
-	return 0;
-}
-#endif
-
+EXPORT_SYMBOL_GPL(usb_free_all_descriptors);

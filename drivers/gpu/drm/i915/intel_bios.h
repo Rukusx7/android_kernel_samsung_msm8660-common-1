@@ -1,5 +1,5 @@
 /*
- * Copyright © 2006 Intel Corporation
+ * Copyright Â© 2006 Intel Corporation
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -28,7 +28,7 @@
 #ifndef _I830_BIOS_H_
 #define _I830_BIOS_H_
 
-#include "drmP.h"
+#include <drm/drmP.h>
 
 struct vbt_header {
 	u8 signature[20];		/**< Always starts with 'VBT$' */
@@ -104,6 +104,7 @@ struct vbios_data {
 #define BDB_LVDS_LFP_DATA	 42
 #define BDB_LVDS_BACKLIGHT	 43
 #define BDB_LVDS_POWER		 44
+#define BDB_MIPI		 50
 #define BDB_SKIP		254 /* VBIOS private block, ignore */
 
 struct bdb_general_features {
@@ -120,12 +121,16 @@ struct bdb_general_features {
 	u8 ssc_freq:1;
 	u8 enable_lfp_on_override:1;
 	u8 disable_ssc_ddt:1;
-	u8 rsvd8:3; /* finish byte */
+	u8 rsvd7:1;
+	u8 display_clock_mode:1;
+	u8 rsvd8:1; /* finish byte */
 
         /* bits 3 */
 	u8 disable_smooth_vision:1;
 	u8 single_dvi:1;
-	u8 rsvd9:6; /* finish byte */
+	u8 rsvd9:1;
+	u8 fdi_rx_polarity_inverted:1;
+	u8 rsvd10:4; /* finish byte */
 
         /* bits 4 */
 	u8 legacy_monitor_detect;
@@ -133,7 +138,10 @@ struct bdb_general_features {
         /* bits 5 */
 	u8 int_crt_support:1;
 	u8 int_tv_support:1;
-	u8 rsvd11:6; /* finish byte */
+	u8 int_efp_support:1;
+	u8 dp_ssc_enb:1;	/* PCH attached eDP supports SSC */
+	u8 dp_ssc_freq:1;	/* SSC freq for PCH attached eDP */
+	u8 rsvd11:3; /* finish byte */
 } __attribute__((packed));
 
 /* pre-915 */
@@ -194,11 +202,13 @@ struct bdb_general_features {
 #define DEVICE_PORT_DVOB	0x01
 #define DEVICE_PORT_DVOC	0x02
 
-struct child_device_config {
+/* We used to keep this struct but without any version control. We should avoid
+ * using it in the future, but it should be safe to keep using it in the old
+ * code. */
+struct old_child_dev_config {
 	u16 handle;
 	u16 device_type;
-	u8  i2c_speed;
-	u8  rsvd[9];
+	u8  device_id[10]; /* ascii string */
 	u16 addin_offset;
 	u8  dvo_port; /* See Device_PORT_* above */
 	u8  i2c_pin;
@@ -216,6 +226,32 @@ struct child_device_config {
 	u16 extended_type;
 	u8  dvo_function;
 } __attribute__((packed));
+
+/* This one contains field offsets that are known to be common for all BDB
+ * versions. Notice that the meaning of the contents contents may still change,
+ * but at least the offsets are consistent. */
+struct common_child_dev_config {
+	u16 handle;
+	u16 device_type;
+	u8 not_common1[12];
+	u8 dvo_port;
+	u8 not_common2[2];
+	u8 ddc_pin;
+	u16 edid_ptr;
+} __attribute__((packed));
+
+/* This field changes depending on the BDB version, so the most reliable way to
+ * read it is by checking the BDB version and reading the raw pointer. */
+union child_device_config {
+	/* This one is safe to be used anywhere, but the code should still check
+	 * the BDB version. */
+	u8 raw[33];
+	/* This one should only be kept for legacy code. */
+	struct old_child_dev_config old;
+	/* This one should also be safe to use anywhere, even without version
+	 * checks. */
+	struct common_child_dev_config common;
+};
 
 struct bdb_general_definitions {
 	/* DDC GPIO */
@@ -240,9 +276,9 @@ struct bdb_general_definitions {
 	 * And the device num is related with the size of general definition
 	 * block. It is obtained by using the following formula:
 	 * number = (block_size - sizeof(bdb_general_definitions))/
-	 * 		sizeof(child_device_config);
+	 *	     sizeof(child_device_config);
 	 */
-	struct child_device_config devices[0];
+	union child_device_config devices[0];
 } __attribute__((packed));
 
 struct bdb_lvds_options {
@@ -446,11 +482,11 @@ struct bdb_driver_features {
 #define EDP_VSWING_1_2V		3
 
 struct edp_power_seq {
-	u16 t3;
-	u16 t7;
+	u16 t1_t3;
+	u16 t8;
 	u16 t9;
 	u16 t10;
-	u16 t12;
+	u16 t11_t12;
 } __attribute__ ((packed));
 
 struct edp_link_params {
@@ -463,12 +499,16 @@ struct edp_link_params {
 struct bdb_edp {
 	struct edp_power_seq power_seqs[16];
 	u32 color_depth;
-	u32 sdrrs_msa_timing_delay;
 	struct edp_link_params link_params[16];
+	u32 sdrrs_msa_timing_delay;
+
+	/* ith bit indicates enabled/disabled for (i+1)th panel */
+	u16 edp_s3d_feature;
+	u16 edp_t3_optimization;
 } __attribute__ ((packed));
 
 void intel_setup_bios(struct drm_device *dev);
-bool intel_parse_bios(struct drm_device *dev);
+int intel_parse_bios(struct drm_device *dev);
 
 /*
  * Driver<->VBIOS interaction occurs through scratch bits in
@@ -598,6 +638,40 @@ bool intel_parse_bios(struct drm_device *dev);
 #define	 DEVICE_TYPE_DP		0x68C6
 #define	 DEVICE_TYPE_eDP	0x78C6
 
+#define  DEVICE_TYPE_CLASS_EXTENSION	(1 << 15)
+#define  DEVICE_TYPE_POWER_MANAGEMENT	(1 << 14)
+#define  DEVICE_TYPE_HOTPLUG_SIGNALING	(1 << 13)
+#define  DEVICE_TYPE_INTERNAL_CONNECTOR	(1 << 12)
+#define  DEVICE_TYPE_NOT_HDMI_OUTPUT	(1 << 11)
+#define  DEVICE_TYPE_MIPI_OUTPUT	(1 << 10)
+#define  DEVICE_TYPE_COMPOSITE_OUTPUT	(1 << 9)
+#define  DEVICE_TYPE_DUAL_CHANNEL	(1 << 8)
+#define  DEVICE_TYPE_HIGH_SPEED_LINK	(1 << 6)
+#define  DEVICE_TYPE_LVDS_SINGALING	(1 << 5)
+#define  DEVICE_TYPE_TMDS_DVI_SIGNALING	(1 << 4)
+#define  DEVICE_TYPE_VIDEO_SIGNALING	(1 << 3)
+#define  DEVICE_TYPE_DISPLAYPORT_OUTPUT	(1 << 2)
+#define  DEVICE_TYPE_DIGITAL_OUTPUT	(1 << 1)
+#define  DEVICE_TYPE_ANALOG_OUTPUT	(1 << 0)
+
+/*
+ * Bits we care about when checking for DEVICE_TYPE_eDP
+ * Depending on the system, the other bits may or may not
+ * be set for eDP outputs.
+ */
+#define DEVICE_TYPE_eDP_BITS \
+	(DEVICE_TYPE_INTERNAL_CONNECTOR | \
+	 DEVICE_TYPE_NOT_HDMI_OUTPUT | \
+	 DEVICE_TYPE_MIPI_OUTPUT | \
+	 DEVICE_TYPE_COMPOSITE_OUTPUT | \
+	 DEVICE_TYPE_DUAL_CHANNEL | \
+	 DEVICE_TYPE_LVDS_SINGALING | \
+	 DEVICE_TYPE_TMDS_DVI_SIGNALING | \
+	 DEVICE_TYPE_VIDEO_SIGNALING | \
+	 DEVICE_TYPE_DISPLAYPORT_OUTPUT | \
+	 DEVICE_TYPE_DIGITAL_OUTPUT | \
+	 DEVICE_TYPE_ANALOG_OUTPUT)
+
 /* define the DVO port for HDMI output type */
 #define		DVO_B		1
 #define		DVO_C		2
@@ -607,5 +681,58 @@ bool intel_parse_bios(struct drm_device *dev);
 #define		PORT_IDPB	7
 #define		PORT_IDPC	8
 #define		PORT_IDPD	9
+
+/* Possible values for the "DVO Port" field for versions >= 155: */
+#define DVO_PORT_HDMIA	0
+#define DVO_PORT_HDMIB	1
+#define DVO_PORT_HDMIC	2
+#define DVO_PORT_HDMID	3
+#define DVO_PORT_LVDS	4
+#define DVO_PORT_TV	5
+#define DVO_PORT_CRT	6
+#define DVO_PORT_DPB	7
+#define DVO_PORT_DPC	8
+#define DVO_PORT_DPD	9
+#define DVO_PORT_DPA	10
+
+/* MIPI DSI panel info */
+struct bdb_mipi {
+	u16 panel_id;
+	u16 bridge_revision;
+
+	/* General params */
+	u32 dithering:1;
+	u32 bpp_pixel_format:1;
+	u32 rsvd1:1;
+	u32 dphy_valid:1;
+	u32 resvd2:28;
+
+	u16 port_info;
+	u16 rsvd3:2;
+	u16 num_lanes:2;
+	u16 rsvd4:12;
+
+	/* DSI config */
+	u16 virt_ch_num:2;
+	u16 vtm:2;
+	u16 rsvd5:12;
+
+	u32 dsi_clock;
+	u32 bridge_ref_clk;
+	u16 rsvd_pwr;
+
+	/* Dphy Params */
+	u32 prepare_cnt:5;
+	u32 rsvd6:3;
+	u32 clk_zero_cnt:8;
+	u32 trail_cnt:5;
+	u32 rsvd7:3;
+	u32 exit_zero_cnt:6;
+	u32 rsvd8:2;
+
+	u32 hl_switch_cnt;
+	u32 lp_byte_clk;
+	u32 clk_lane_switch_cnt;
+} __attribute__((packed));
 
 #endif /* _I830_BIOS_H_ */

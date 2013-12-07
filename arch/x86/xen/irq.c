@@ -5,6 +5,7 @@
 #include <xen/interface/xen.h>
 #include <xen/interface/sched.h>
 #include <xen/interface/vcpu.h>
+#include <xen/events.h>
 
 #include <asm/xen/hypercall.h>
 #include <asm/xen/hypervisor.h>
@@ -26,7 +27,7 @@ static unsigned long xen_save_fl(void)
 	struct vcpu_info *vcpu;
 	unsigned long flags;
 
-	vcpu = percpu_read(xen_vcpu);
+	vcpu = this_cpu_read(xen_vcpu);
 
 	/* flag has opposite sense of mask */
 	flags = !vcpu->evtchn_upcall_mask;
@@ -46,23 +47,18 @@ static void xen_restore_fl(unsigned long flags)
 	/* convert from IF type flag */
 	flags = !(flags & X86_EFLAGS_IF);
 
-	/* There's a one instruction preempt window here.  We need to
-	   make sure we're don't switch CPUs between getting the vcpu
-	   pointer and updating the mask. */
+	/* See xen_irq_enable() for why preemption must be disabled. */
 	preempt_disable();
-	vcpu = percpu_read(xen_vcpu);
+	vcpu = this_cpu_read(xen_vcpu);
 	vcpu->evtchn_upcall_mask = flags;
-	preempt_enable_no_resched();
-
-	/* Doesn't matter if we get preempted here, because any
-	   pending event will get dealt with anyway. */
 
 	if (flags == 0) {
-		preempt_check_resched();
 		barrier(); /* unmask then check (avoid races) */
 		if (unlikely(vcpu->evtchn_upcall_pending))
 			xen_force_evtchn_callback();
-	}
+		preempt_enable();
+	} else
+		preempt_enable_no_resched();
 }
 PV_CALLEE_SAVE_REGS_THUNK(xen_restore_fl);
 
@@ -72,7 +68,7 @@ static void xen_irq_disable(void)
 	   make sure we're don't switch CPUs between getting the vcpu
 	   pointer and updating the mask. */
 	preempt_disable();
-	percpu_read(xen_vcpu)->evtchn_upcall_mask = 1;
+	this_cpu_read(xen_vcpu)->evtchn_upcall_mask = 1;
 	preempt_enable_no_resched();
 }
 PV_CALLEE_SAVE_REGS_THUNK(xen_irq_disable);
@@ -81,12 +77,14 @@ static void xen_irq_enable(void)
 {
 	struct vcpu_info *vcpu;
 
-	/* We don't need to worry about being preempted here, since
-	   either a) interrupts are disabled, so no preemption, or b)
-	   the caller is confused and is trying to re-enable interrupts
-	   on an indeterminate processor. */
+	/*
+	 * We may be preempted as soon as vcpu->evtchn_upcall_mask is
+	 * cleared, so disable preemption to ensure we check for
+	 * events on the VCPU we are still running on.
+	 */
+	preempt_disable();
 
-	vcpu = percpu_read(xen_vcpu);
+	vcpu = this_cpu_read(xen_vcpu);
 	vcpu->evtchn_upcall_mask = 0;
 
 	/* Doesn't matter if we get preempted here, because any
@@ -95,6 +93,8 @@ static void xen_irq_enable(void)
 	barrier(); /* unmask then check (avoid races) */
 	if (unlikely(vcpu->evtchn_upcall_pending))
 		xen_force_evtchn_callback();
+
+	preempt_enable();
 }
 PV_CALLEE_SAVE_REGS_THUNK(xen_irq_enable);
 

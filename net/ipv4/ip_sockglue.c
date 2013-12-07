@@ -33,12 +33,14 @@
 #include <linux/netfilter.h>
 #include <linux/route.h>
 #include <linux/mroute.h>
+#include <net/inet_ecn.h>
 #include <net/route.h>
 #include <net/xfrm.h>
 #include <net/compat.h>
-#if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
+#if IS_ENABLED(CONFIG_IPV6)
 #include <net/transp_v6.h>
 #endif
+#include <net/ip_fib.h>
 
 #include <linux/errqueue.h>
 #include <asm/uaccess.h>
@@ -54,20 +56,13 @@
 /*
  *	SOL_IP control messages.
  */
+#define PKTINFO_SKB_CB(__skb) ((struct in_pktinfo *)((__skb)->cb))
 
 static void ip_cmsg_recv_pktinfo(struct msghdr *msg, struct sk_buff *skb)
 {
-	struct in_pktinfo info;
-	struct rtable *rt = skb_rtable(skb);
+	struct in_pktinfo info = *PKTINFO_SKB_CB(skb);
 
 	info.ipi_addr.s_addr = ip_hdr(skb)->daddr;
-	if (rt) {
-		info.ipi_ifindex = rt->rt_iif;
-		info.ipi_spec_dst.s_addr = rt->rt_spec_dst;
-	} else {
-		info.ipi_ifindex = 0;
-		info.ipi_spec_dst.s_addr = 0;
-	}
 
 	put_cmsg(msg, SOL_IP, IP_PKTINFO, sizeof(info), &info);
 }
@@ -96,7 +91,7 @@ static void ip_cmsg_recv_opts(struct msghdr *msg, struct sk_buff *skb)
 static void ip_cmsg_recv_retopts(struct msghdr *msg, struct sk_buff *skb)
 {
 	unsigned char optbuf[sizeof(struct ip_options) + 40];
-	struct ip_options * opt = (struct ip_options *)optbuf;
+	struct ip_options *opt = (struct ip_options *)optbuf;
 
 	if (IPCB(skb)->opt.optlen == 0)
 		return;
@@ -153,7 +148,7 @@ static void ip_cmsg_recv_dstaddr(struct msghdr *msg, struct sk_buff *skb)
 void ip_cmsg_recv(struct msghdr *msg, struct sk_buff *skb)
 {
 	struct inet_sock *inet = inet_sk(skb->sk);
-	unsigned flags = inet->cmsg_flags;
+	unsigned int flags = inet->cmsg_flags;
 
 	/* Ordered by supposed usage frequency */
 	if (flags & 1)
@@ -194,7 +189,7 @@ EXPORT_SYMBOL(ip_cmsg_recv);
 
 int ip_cmsg_send(struct net *net, struct msghdr *msg, struct ipcm_cookie *ipc)
 {
-	int err;
+	int err, val;
 	struct cmsghdr *cmsg;
 
 	for (cmsg = CMSG_FIRSTHDR(msg); cmsg; cmsg = CMSG_NXTHDR(msg, cmsg)) {
@@ -220,6 +215,24 @@ int ip_cmsg_send(struct net *net, struct msghdr *msg, struct ipcm_cookie *ipc)
 			ipc->addr = info->ipi_spec_dst.s_addr;
 			break;
 		}
+		case IP_TTL:
+			if (cmsg->cmsg_len != CMSG_LEN(sizeof(int)))
+				return -EINVAL;
+			val = *(int *)CMSG_DATA(cmsg);
+			if (val < 1 || val > 255)
+				return -EINVAL;
+			ipc->ttl = val;
+			break;
+		case IP_TOS:
+			if (cmsg->cmsg_len != CMSG_LEN(sizeof(int)))
+				return -EINVAL;
+			val = *(int *)CMSG_DATA(cmsg);
+			if (val < 0 || val > 255)
+				return -EINVAL;
+			ipc->tos = val;
+			ipc->priority = rt_tos2priority(ipc->tos);
+			break;
+
 		default:
 			return -EINVAL;
 		}
@@ -373,7 +386,7 @@ void ip_local_error(struct sock *sk, int err, __be32 daddr, __be16 port, u32 inf
 /*
  *	Handle MSG_ERRQUEUE
  */
-int ip_recv_error(struct sock *sk, struct msghdr *msg, int len)
+int ip_recv_error(struct sock *sk, struct msghdr *msg, int len, int *addr_len)
 {
 	struct sock_exterr_skb *serr;
 	struct sk_buff *skb, *skb2;
@@ -410,6 +423,7 @@ int ip_recv_error(struct sock *sk, struct msghdr *msg, int len)
 						   serr->addr_offset);
 		sin->sin_port = serr->port;
 		memset(&sin->sin_zero, 0, sizeof(sin->sin_zero));
+		*addr_len = sizeof(*sin);
 	}
 
 	memcpy(&errhdr.ee, &serr->ee, sizeof(struct sock_extended_err));
@@ -451,11 +465,6 @@ out:
 }
 
 
-static void opt_kfree_rcu(struct rcu_head *head)
-{
-	kfree(container_of(head, struct ip_options_rcu, rcu));
-}
-
 /*
  *	Socket option code for IP. This is the end of the line after any
  *	TCP,UDP etc options on an IP socket.
@@ -484,6 +493,7 @@ static int do_ip_setsockopt(struct sock *sk, int level,
 	case IP_TRANSPARENT:
 	case IP_MINTTL:
 	case IP_NODEFRAG:
+	case IP_UNICAST_IF:
 	case IP_MULTICAST_TTL:
 	case IP_MULTICAST_ALL:
 	case IP_MULTICAST_LOOP:
@@ -523,7 +533,7 @@ static int do_ip_setsockopt(struct sock *sk, int level,
 						sock_owned_by_user(sk));
 		if (inet->is_icsk) {
 			struct inet_connection_sock *icsk = inet_csk(sk);
-#if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
+#if IS_ENABLED(CONFIG_IPV6)
 			if (sk->sk_family == PF_INET ||
 			    (!((1 << sk->sk_state) &
 			       (TCPF_LISTEN | TCPF_CLOSE)) &&
@@ -534,13 +544,13 @@ static int do_ip_setsockopt(struct sock *sk, int level,
 				if (opt)
 					icsk->icsk_ext_hdr_len += opt->opt.optlen;
 				icsk->icsk_sync_mss(sk, icsk->icsk_pmtu_cookie);
-#if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
+#if IS_ENABLED(CONFIG_IPV6)
 			}
 #endif
 		}
 		rcu_assign_pointer(inet->inet_opt, opt);
 		if (old)
-			call_rcu(&old->rcu, opt_kfree_rcu);
+			kfree_rcu(old, rcu);
 		break;
 	}
 	case IP_PKTINFO:
@@ -587,8 +597,8 @@ static int do_ip_setsockopt(struct sock *sk, int level,
 		break;
 	case IP_TOS:	/* This sets both TOS and Precedence */
 		if (sk->sk_type == SOCK_STREAM) {
-			val &= ~3;
-			val |= inet->tos & 3;
+			val &= ~INET_ECN_MASK;
+			val |= inet->tos & INET_ECN_MASK;
 		}
 		if (inet->tos != val) {
 			inet->tos = val;
@@ -618,7 +628,7 @@ static int do_ip_setsockopt(struct sock *sk, int level,
 		inet->nodefrag = val ? 1 : 0;
 		break;
 	case IP_MTU_DISCOVER:
-		if (val < IP_PMTUDISC_DONT || val > IP_PMTUDISC_PROBE)
+		if (val < IP_PMTUDISC_DONT || val > IP_PMTUDISC_INTERFACE)
 			goto e_inval;
 		inet->pmtudisc = val;
 		break;
@@ -643,6 +653,35 @@ static int do_ip_setsockopt(struct sock *sk, int level,
 			goto e_inval;
 		inet->mc_loop = !!val;
 		break;
+	case IP_UNICAST_IF:
+	{
+		struct net_device *dev = NULL;
+		int ifindex;
+
+		if (optlen != sizeof(int))
+			goto e_inval;
+
+		ifindex = (__force int)ntohl((__force __be32)val);
+		if (ifindex == 0) {
+			inet->uc_index = 0;
+			err = 0;
+			break;
+		}
+
+		dev = dev_get_by_index(sock_net(sk), ifindex);
+		err = -EADDRNOTAVAIL;
+		if (!dev)
+			break;
+		dev_put(dev);
+
+		err = -EINVAL;
+		if (sk->sk_bound_dev_if)
+			break;
+
+		inet->uc_index = ifindex;
+		err = 0;
+		break;
+	}
 	case IP_MULTICAST_IF:
 	{
 		struct ip_mreqn mreq;
@@ -663,10 +702,15 @@ static int do_ip_setsockopt(struct sock *sk, int level,
 				break;
 		} else {
 			memset(&mreq, 0, sizeof(mreq));
-			if (optlen >= sizeof(struct in_addr) &&
-			    copy_from_user(&mreq.imr_address, optval,
-					   sizeof(struct in_addr)))
-				break;
+			if (optlen >= sizeof(struct ip_mreq)) {
+				if (copy_from_user(&mreq, optval,
+						   sizeof(struct ip_mreq)))
+					break;
+			} else if (optlen >= sizeof(struct in_addr)) {
+				if (copy_from_user(&mreq.imr_address, optval,
+						   sizeof(struct in_addr)))
+					break;
+			}
 		}
 
 		if (!mreq.imr_ifindex) {
@@ -964,13 +1008,14 @@ mc_msf_out:
 	case IP_IPSEC_POLICY:
 	case IP_XFRM_POLICY:
 		err = -EPERM;
-		if (!capable(CAP_NET_ADMIN))
+		if (!ns_capable(sock_net(sk)->user_ns, CAP_NET_ADMIN))
 			break;
 		err = xfrm_user_policy(sk, optname, optval, optlen);
 		break;
 
 	case IP_TRANSPARENT:
-		if (!capable(CAP_NET_ADMIN)) {
+		if (!!val && !ns_capable(sock_net(sk)->user_ns, CAP_NET_RAW) &&
+		    !ns_capable(sock_net(sk)->user_ns, CAP_NET_ADMIN)) {
 			err = -EPERM;
 			break;
 		}
@@ -1000,20 +1045,28 @@ e_inval:
 }
 
 /**
- * ip_queue_rcv_skb - Queue an skb into sock receive queue
+ * ipv4_pktinfo_prepare - transfert some info from rtable to skb
  * @sk: socket
  * @skb: buffer
  *
- * Queues an skb into socket receive queue. If IP_CMSG_PKTINFO option
- * is not set, we drop skb dst entry now, while dst cache line is hot.
+ * To support IP_CMSG_PKTINFO option, we store rt_iif and specific
+ * destination in skb->cb[] before dst drop.
+ * This way, receiver doesnt make cache line misses to read rtable.
  */
-int ip_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
+void ipv4_pktinfo_prepare(const struct sock *sk, struct sk_buff *skb)
 {
-	if (!(inet_sk(sk)->cmsg_flags & IP_CMSG_PKTINFO))
-		skb_dst_drop(skb);
-	return sock_queue_rcv_skb(sk, skb);
+	struct in_pktinfo *pktinfo = PKTINFO_SKB_CB(skb);
+
+	if ((inet_sk(sk)->cmsg_flags & IP_CMSG_PKTINFO) &&
+	    skb_rtable(skb)) {
+		pktinfo->ipi_ifindex = inet_iif(skb);
+		pktinfo->ipi_spec_dst.s_addr = fib_compute_spec_dst(skb);
+	} else {
+		pktinfo->ipi_ifindex = 0;
+		pktinfo->ipi_spec_dst.s_addr = 0;
+	}
+	skb_dst_drop(skb);
 }
-EXPORT_SYMBOL(ip_queue_rcv_skb);
 
 int ip_setsockopt(struct sock *sk, int level,
 		int optname, char __user *optval, unsigned int optlen)
@@ -1076,7 +1129,7 @@ EXPORT_SYMBOL(compat_ip_setsockopt);
  */
 
 static int do_ip_getsockopt(struct sock *sk, int level, int optname,
-			    char __user *optval, int __user *optlen)
+			    char __user *optval, int __user *optlen, unsigned int flags)
 {
 	struct inet_sock *inet = inet_sk(sk);
 	int val;
@@ -1185,6 +1238,9 @@ static int do_ip_getsockopt(struct sock *sk, int level, int optname,
 	case IP_MULTICAST_LOOP:
 		val = inet->mc_loop;
 		break;
+	case IP_UNICAST_IF:
+		val = (__force int)htonl((__u32) inet->uc_index);
+		break;
 	case IP_MULTICAST_IF:
 	{
 		struct in_addr addr;
@@ -1249,7 +1305,7 @@ static int do_ip_getsockopt(struct sock *sk, int level, int optname,
 
 		msg.msg_control = optval;
 		msg.msg_controllen = len;
-		msg.msg_flags = 0;
+		msg.msg_flags = flags;
 
 		if (inet->cmsg_flags & IP_CMSG_PKTINFO) {
 			struct in_pktinfo info;
@@ -1262,6 +1318,10 @@ static int do_ip_getsockopt(struct sock *sk, int level, int optname,
 		if (inet->cmsg_flags & IP_CMSG_TTL) {
 			int hlim = inet->mc_ttl;
 			put_cmsg(&msg, SOL_IP, IP_TTL, sizeof(hlim), &hlim);
+		}
+		if (inet->cmsg_flags & IP_CMSG_TOS) {
+			int tos = inet->rcv_tos;
+			put_cmsg(&msg, SOL_IP, IP_TOS, sizeof(tos), &tos);
 		}
 		len -= msg.msg_controllen;
 		return put_user(len, optlen);
@@ -1303,7 +1363,7 @@ int ip_getsockopt(struct sock *sk, int level,
 {
 	int err;
 
-	err = do_ip_getsockopt(sk, level, optname, optval, optlen);
+	err = do_ip_getsockopt(sk, level, optname, optval, optlen, 0);
 #ifdef CONFIG_NETFILTER
 	/* we need to exclude all possible ENOPROTOOPTs except default case */
 	if (err == -ENOPROTOOPT && optname != IP_PKTOPTIONS &&
@@ -1336,7 +1396,8 @@ int compat_ip_getsockopt(struct sock *sk, int level, int optname,
 		return compat_mc_getsockopt(sk, level, optname, optval, optlen,
 			ip_getsockopt);
 
-	err = do_ip_getsockopt(sk, level, optname, optval, optlen);
+	err = do_ip_getsockopt(sk, level, optname, optval, optlen,
+		MSG_CMSG_COMPAT);
 
 #ifdef CONFIG_NETFILTER
 	/* we need to exclude all possible ENOPROTOOPTs except default case */

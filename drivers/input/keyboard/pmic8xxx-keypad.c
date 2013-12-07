@@ -1,4 +1,4 @@
-/* Copyright (c) 2009-2011, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2009-2011, Code Aurora Forum. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -23,7 +23,6 @@
 #include <linux/mfd/pm8xxx/core.h>
 #include <linux/mfd/pm8xxx/gpio.h>
 #include <linux/input/pmic8xxx-keypad.h>
-#include <mach/sec_debug.h>
 
 #define PM8XXX_MAX_ROWS		18
 #define PM8XXX_MAX_COLS		8
@@ -111,19 +110,12 @@ struct pmic8xxx_kp {
 	u8 ctrl_reg;
 };
 
-static int pmic8xxx_kp_enable(struct pmic8xxx_kp *kp);
-static int pmic8xxx_kp_disable(struct pmic8xxx_kp *kp);
-extern int pmic8xxx_pwrkey_status(void);
-
 static int pmic8xxx_kp_write_u8(struct pmic8xxx_kp *kp,
 				 u8 data, u16 reg)
 {
 	int rc;
 
 	rc = pm8xxx_writeb(kp->dev->parent, reg, data);
-	if (rc < 0)
-		dev_warn(kp->dev, "Error writing pmic8xxx: %X - ret %X\n",
-				reg, rc);
 	return rc;
 }
 
@@ -133,10 +125,6 @@ static int pmic8xxx_kp_read(struct pmic8xxx_kp *kp,
 	int rc;
 
 	rc = pm8xxx_read_buf(kp->dev->parent, reg, data, num_bytes);
-	if (rc < 0)
-		dev_warn(kp->dev, "Error reading pmic8xxx: %X - ret %X\n",
-				reg, rc);
-
 	return rc;
 }
 
@@ -146,9 +134,6 @@ static int pmic8xxx_kp_read_u8(struct pmic8xxx_kp *kp,
 	int rc;
 
 	rc = pmic8xxx_kp_read(kp, data, reg, 1);
-	if (rc < 0)
-		dev_warn(kp->dev, "Error reading pmic8xxx: %X - ret %X\n",
-				reg, rc);
 	return rc;
 }
 
@@ -292,19 +277,6 @@ static void __pmic8xxx_kp_scan_matrix(struct pmic8xxx_kp *kp, u16 *new_state,
 					!(new_state[row] & (1 << col)));
 
 			input_sync(kp->input);
-
-#if defined (DSEC_KEYBOARD_CODE_DEBUG)
-			pr_info("key [%d:%d] %s keycode [%d]\n", row, col,
-					!(new_state[row] & (1 << col)) ?
-					"pressed" : "released", kp->keycodes[code]);
-#else
-			pr_info("key %s\n", 
-					!(new_state[row] & (1 << col)) ? "pressed" : "released");
-#endif
-
-#if defined(CONFIG_SEC_DEBUG)
-			sec_debug_check_crash_key(kp->keycodes[code], !(new_state[row] & (1 << col)));
-#endif
 		}
 	}
 }
@@ -375,69 +347,6 @@ static int pmic8xxx_kp_scan_matrix(struct pmic8xxx_kp *kp, unsigned int events)
 	return rc;
 }
 
-static ssize_t pmic8xxx_kp_disable_show(struct device *dev,
-					struct device_attribute *attr,
-					char *buf)
-{
-	struct pmic8xxx_kp *kp = dev_get_drvdata(dev);
-
-	return sprintf(buf, "%u\n", (kp->ctrl_reg & KEYP_CTRL_KEYP_EN) ? 0 : 1);
-}
-
-static ssize_t pmic8xxx_kp_disable_store(struct device *dev,
-					struct device_attribute *attr,
-					const char *buf, size_t count)
-{
-	struct pmic8xxx_kp *kp = dev_get_drvdata(dev);
-	struct input_dev *input_dev = kp->input;
-	long i = 0;
-	int rc;
-
-	rc = strict_strtoul(buf, 10, &i);
-	if (rc)
-		return -EINVAL;
-
-	i = !!i;
-
-	mutex_lock(&input_dev->mutex);
-	if (i)
-		pmic8xxx_kp_disable(kp);
-	else
-		pmic8xxx_kp_enable(kp);
-	mutex_unlock(&input_dev->mutex);
-
-	return count;
-}
-
-static ssize_t pmic8xxx_kp_pressed_show(struct device *dev,
-				struct device_attribute *attr, char *buf)
-{
-	int row, col;
-	int keystate = 0;
-	int pwrkeystate = 0;
-	struct pmic8xxx_kp *kp = dev_get_drvdata(dev);
-
-	for (row = 0; row < kp->pdata->num_rows; row++) {
-		for (col = 0; col < kp->pdata->num_cols; col++) {
-			if(!(kp->keystate[row] & (1 << col))) {
-				keystate = 1;
-			}
-		}
-	}
-	pwrkeystate = pmic8xxx_pwrkey_status();
-
-	if (keystate || pwrkeystate)
-		sprintf(buf, "PRESS");
-	else
-		sprintf(buf, "RELEASE");
-
-	return strlen(buf);
-}
-
-static DEVICE_ATTR(disable_kp, 0664, pmic8xxx_kp_disable_show,
-			pmic8xxx_kp_disable_store);
-static DEVICE_ATTR(key_pressed, 0664, pmic8xxx_kp_pressed_show, NULL);
-
 /*
  * NOTE: We are reading recent and old data registers blindly
  * whenever key-stuck interrupt happens, because events counter doesn't
@@ -488,7 +397,7 @@ static irqreturn_t pmic8xxx_kp_irq(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
-static int __devinit pmic8xxx_kpd_init(struct pmic8xxx_kp *kp)
+static int pmic8xxx_kpd_init(struct pmic8xxx_kp *kp)
 {
 	int bits, rc, cycles;
 	u8 scan_val = 0, ctrl_val = 0;
@@ -538,7 +447,7 @@ static int __devinit pmic8xxx_kpd_init(struct pmic8xxx_kp *kp)
 
 }
 
-static int  __devinit pmic8xxx_kp_config_gpio(int gpio_start, int num_gpios,
+static int  pmic8xxx_kp_config_gpio(int gpio_start, int num_gpios,
 			struct pmic8xxx_kp *kp, struct pm_gpio *gpio_config)
 {
 	int	rc, i;
@@ -554,7 +463,7 @@ static int  __devinit pmic8xxx_kp_config_gpio(int gpio_start, int num_gpios,
 					__func__, gpio_start + i, rc);
 			return rc;
 		}
-	}
+	 }
 
 	return 0;
 }
@@ -609,7 +518,7 @@ static void pmic8xxx_kp_close(struct input_dev *dev)
  * - set irq edge type.
  * - enable the keypad controller.
  */
-static int __devinit pmic8xxx_kp_probe(struct platform_device *pdev)
+static int pmic8xxx_kp_probe(struct platform_device *pdev)
 {
 	const struct pm8xxx_keypad_platform_data *pdata =
 					dev_get_platdata(&pdev->dev);
@@ -623,7 +532,7 @@ static int __devinit pmic8xxx_kp_probe(struct platform_device *pdev)
 		.output_buffer	= PM_GPIO_OUT_BUF_OPEN_DRAIN,
 		.output_value	= 0,
 		.pull		= PM_GPIO_PULL_NO,
-		.vin_sel	= PM_GPIO_VIN_S4,
+		.vin_sel	= PM_GPIO_VIN_S3,
 		.out_strength	= PM_GPIO_STRENGTH_LOW,
 		.function	= PM_GPIO_FUNC_1,
 		.inv_int_pol	= 1,
@@ -632,7 +541,7 @@ static int __devinit pmic8xxx_kp_probe(struct platform_device *pdev)
 	struct pm_gpio kypd_sns = {
 		.direction	= PM_GPIO_DIR_IN,
 		.pull		= PM_GPIO_PULL_UP_31P5,
-		.vin_sel	= PM_GPIO_VIN_S4,
+		.vin_sel	= PM_GPIO_VIN_S3,
 		.out_strength	= PM_GPIO_STRENGTH_NO,
 		.function	= PM_GPIO_FUNC_NORMAL,
 		.inv_int_pol	= 1,
@@ -717,23 +626,21 @@ static int __devinit pmic8xxx_kp_probe(struct platform_device *pdev)
 	kp->input->id.product	= 0x0001;
 	kp->input->id.vendor	= 0x0001;
 
-	kp->input->evbit[0]	= BIT_MASK(EV_KEY);
-
-	if (pdata->rep)
-		__set_bit(EV_REP, kp->input->evbit);
-
-	kp->input->keycode	= kp->keycodes;
-	kp->input->keycodemax	= PM8XXX_MATRIX_MAX_SIZE;
-	kp->input->keycodesize	= sizeof(kp->keycodes);
 	kp->input->open		= pmic8xxx_kp_open;
 	kp->input->close	= pmic8xxx_kp_close;
 
-	matrix_keypad_build_keymap(keymap_data, PM8XXX_ROW_SHIFT,
-					kp->input->keycode, kp->input->keybit);
+	rc = matrix_keypad_build_keymap(keymap_data, NULL,
+					PM8XXX_MAX_ROWS, PM8XXX_MAX_COLS,
+					kp->keycodes, kp->input);
+	if (rc) {
+		dev_err(&pdev->dev, "failed to build keymap\n");
+		goto err_get_irq;
+	}
 
- 	input_set_capability(kp->input, EV_KEY, KEY_VOLUMEDOWN);
- 	input_set_capability(kp->input, EV_KEY, KEY_VOLUMEUP);
- 	input_set_capability(kp->input, EV_KEY, KEY_HOME);
+	if (pdata->rep)
+		__set_bit(EV_REP, kp->input->evbit);
+	input_set_capability(kp->input, EV_MSC, MSC_SCAN);
+
 	input_set_drvdata(kp->input, kp);
 
 	/* initialize keypad state */
@@ -788,20 +695,10 @@ static int __devinit pmic8xxx_kp_probe(struct platform_device *pdev)
 		goto err_pmic_reg_read;
 	}
 
-	rc = device_create_file(&pdev->dev, &dev_attr_key_pressed);
-	if (rc < 0)
-		goto err_create_file;
-
-	rc = device_create_file(&pdev->dev, &dev_attr_disable_kp);
-	if (rc < 0)
-		goto err_create_file;
-
 	device_init_wakeup(&pdev->dev, pdata->wakeup);
 
 	return 0;
 
-err_create_file:
-	free_irq(kp->key_stuck_irq, kp);
 err_pmic_reg_read:
 	free_irq(kp->key_stuck_irq, kp);
 err_req_stuck_irq:
@@ -810,12 +707,11 @@ err_gpio_config:
 err_get_irq:
 	input_free_device(kp->input);
 err_alloc_device:
-	platform_set_drvdata(pdev, NULL);
 	kfree(kp);
 	return rc;
 }
 
-static int __devexit pmic8xxx_kp_remove(struct platform_device *pdev)
+static int pmic8xxx_kp_remove(struct platform_device *pdev)
 {
 	struct pmic8xxx_kp *kp = platform_get_drvdata(pdev);
 
@@ -825,7 +721,6 @@ static int __devexit pmic8xxx_kp_remove(struct platform_device *pdev)
 	input_unregister_device(kp->input);
 	kfree(kp);
 
-	platform_set_drvdata(pdev, NULL);
 	return 0;
 }
 
@@ -876,25 +771,14 @@ static SIMPLE_DEV_PM_OPS(pm8xxx_kp_pm_ops,
 
 static struct platform_driver pmic8xxx_kp_driver = {
 	.probe		= pmic8xxx_kp_probe,
-	.remove		= __devexit_p(pmic8xxx_kp_remove),
+	.remove		= pmic8xxx_kp_remove,
 	.driver		= {
 		.name = PM8XXX_KEYPAD_DEV_NAME,
 		.owner = THIS_MODULE,
 		.pm = &pm8xxx_kp_pm_ops,
 	},
 };
-
-static int __init pmic8xxx_kp_init(void)
-{
-	return platform_driver_register(&pmic8xxx_kp_driver);
-}
-module_init(pmic8xxx_kp_init);
-
-static void __exit pmic8xxx_kp_exit(void)
-{
-	platform_driver_unregister(&pmic8xxx_kp_driver);
-}
-module_exit(pmic8xxx_kp_exit);
+module_platform_driver(pmic8xxx_kp_driver);
 
 MODULE_LICENSE("GPL v2");
 MODULE_DESCRIPTION("PMIC8XXX keypad driver");

@@ -51,12 +51,12 @@ static const struct hc_driver ehci_octeon_hc_driver = {
 	 * generic hardware linkage
 	 */
 	.irq			= ehci_irq,
-	.flags			= HCD_MEMORY | HCD_USB2,
+	.flags			= HCD_MEMORY | HCD_USB2 | HCD_BH,
 
 	/*
 	 * basic lifecycle operations
 	 */
-	.reset			= ehci_init,
+	.reset			= ehci_setup,
 	.start			= ehci_run,
 	.stop			= ehci_stop,
 	.shutdown		= ehci_shutdown,
@@ -116,15 +116,17 @@ static int ehci_octeon_drv_probe(struct platform_device *pdev)
 	 * We can DMA from anywhere. But the descriptors must be in
 	 * the lower 4GB.
 	 */
-	pdev->dev.coherent_dma_mask = DMA_BIT_MASK(32);
 	pdev->dev.dma_mask = &ehci_octeon_dma_mask;
+	ret = dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(32));
+	if (ret)
+		return ret;
 
 	hcd = usb_create_hcd(&ehci_octeon_hc_driver, &pdev->dev, "octeon");
 	if (!hcd)
 		return -ENOMEM;
 
 	hcd->rsrc_start = res_mem->start;
-	hcd->rsrc_len = res_mem->end - res_mem->start + 1;
+	hcd->rsrc_len = resource_size(res_mem);
 
 	if (!request_mem_region(hcd->rsrc_start, hcd->rsrc_len,
 				OCTEON_EHCI_HCD_NAME)) {
@@ -150,21 +152,14 @@ static int ehci_octeon_drv_probe(struct platform_device *pdev)
 #endif
 
 	ehci->caps = hcd->regs;
-	ehci->regs = hcd->regs +
-		HC_LENGTH(ehci, ehci_readl(ehci, &ehci->caps->hc_capbase));
-	/* cache this readonly data; minimize chip reads */
-	ehci->hcs_params = ehci_readl(ehci, &ehci->caps->hcs_params);
 
-	ret = usb_add_hcd(hcd, irq, IRQF_DISABLED | IRQF_SHARED);
+	ret = usb_add_hcd(hcd, irq, IRQF_SHARED);
 	if (ret) {
 		dev_dbg(&pdev->dev, "failed to add hcd with err %d\n", ret);
 		goto err3;
 	}
 
 	platform_set_drvdata(pdev, hcd);
-
-	/* root ports should always stay powered */
-	ehci_port_power(ehci, 1);
 
 	return 0;
 err3:
@@ -188,8 +183,6 @@ static int ehci_octeon_drv_remove(struct platform_device *pdev)
 	iounmap(hcd->regs);
 	release_mem_region(hcd->rsrc_start, hcd->rsrc_len);
 	usb_put_hcd(hcd);
-
-	platform_set_drvdata(pdev, NULL);
 
 	return 0;
 }

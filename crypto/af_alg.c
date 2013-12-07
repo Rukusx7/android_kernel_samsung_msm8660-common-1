@@ -12,7 +12,7 @@
  *
  */
 
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 #include <crypto/if_alg.h>
 #include <linux/crypto.h>
 #include <linux/init.h>
@@ -434,7 +434,7 @@ int af_alg_wait_for_completion(int err, struct af_alg_completion *completion)
 	case -EINPROGRESS:
 	case -EBUSY:
 		wait_for_completion(&completion->completion);
-		INIT_COMPLETION(completion->completion);
+		reinit_completion(&completion->completion);
 		err = completion->err;
 		break;
 	};

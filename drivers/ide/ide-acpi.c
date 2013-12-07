@@ -7,6 +7,7 @@
  * Copyright (C) 2006 Hannes Reinecke
  */
 
+#include <linux/acpi.h>
 #include <linux/ata.h>
 #include <linux/delay.h>
 #include <linux/device.h>
@@ -17,8 +18,7 @@
 #include <linux/ide.h>
 #include <linux/pci.h>
 #include <linux/dmi.h>
-
-#include <acpi/acpi_bus.h>
+#include <linux/module.h>
 
 #define REGS_PER_GTF		7
 
@@ -52,15 +52,15 @@ struct ide_acpi_hwif_link {
 #define DEBPRINT(fmt, args...)	do {} while (0)
 #endif	/* DEBUGGING */
 
-static int ide_noacpi;
+static bool ide_noacpi;
 module_param_named(noacpi, ide_noacpi, bool, 0);
 MODULE_PARM_DESC(noacpi, "disable IDE ACPI support");
 
-static int ide_acpigtf;
+static bool ide_acpigtf;
 module_param_named(acpigtf, ide_acpigtf, bool, 0);
 MODULE_PARM_DESC(acpigtf, "enable IDE ACPI _GTF support");
 
-static int ide_acpionboot;
+static bool ide_acpionboot;
 module_param_named(acpionboot, ide_acpionboot, bool, 0);
 MODULE_PARM_DESC(acpionboot, "call IDE ACPI methods on boot");
 
@@ -127,7 +127,7 @@ static int ide_get_dev_handle(struct device *dev, acpi_handle *handle,
 
 	DEBPRINT("ENTER: pci %02x:%02x.%01x\n", bus, devnum, func);
 
-	dev_handle = DEVICE_ACPI_HANDLE(dev);
+	dev_handle = ACPI_HANDLE(dev);
 	if (!dev_handle) {
 		DEBPRINT("no acpi handle for device\n");
 		goto err;
@@ -519,11 +519,12 @@ void ide_acpi_set_state(ide_hwif_t *hwif, int on)
 	ide_port_for_each_present_dev(i, drive, hwif) {
 		if (drive->acpidata->obj_handle)
 			acpi_bus_set_power(drive->acpidata->obj_handle,
-					   on ? ACPI_STATE_D0 : ACPI_STATE_D3);
+				on ? ACPI_STATE_D0 : ACPI_STATE_D3_COLD);
 	}
 
 	if (!on)
-		acpi_bus_set_power(hwif->acpidata->obj_handle, ACPI_STATE_D3);
+		acpi_bus_set_power(hwif->acpidata->obj_handle,
+				   ACPI_STATE_D3_COLD);
 }
 
 /**

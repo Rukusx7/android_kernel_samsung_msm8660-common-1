@@ -10,9 +10,9 @@
  *      2 of the License, or (at your option) any later version.
  */
 
-#undef DEBUG
+#define DEBUG
 
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/string.h>
 #include <linux/sched.h>
 #include <linux/init.h>
@@ -35,6 +35,8 @@
 #include <linux/pci.h>
 #include <linux/lockdep.h>
 #include <linux/memblock.h>
+#include <linux/hugetlb.h>
+
 #include <asm/io.h>
 #include <asm/kdump.h>
 #include <asm/prom.h>
@@ -50,7 +52,6 @@
 #include <asm/btext.h>
 #include <asm/nvram.h>
 #include <asm/setup.h>
-#include <asm/system.h>
 #include <asm/rtas.h>
 #include <asm/iommu.h>
 #include <asm/serial.h>
@@ -63,8 +64,9 @@
 #include <asm/kexec.h>
 #include <asm/mmu_context.h>
 #include <asm/code-patching.h>
-
-#include "setup.h"
+#include <asm/kvm_ppc.h>
+#include <asm/hugetlb.h>
+#include <asm/epapr_hcalls.h>
 
 #ifdef DEBUG
 #define DBG(fmt...) udbg_printf(fmt)
@@ -73,7 +75,7 @@
 #endif
 
 int boot_cpuid = 0;
-int __initdata boot_cpu_count;
+int spinning_secondaries;
 u64 ppc64_pft_size;
 
 /* Pick defaults since we might want to patch instructions
@@ -153,6 +155,15 @@ early_param("smt-enabled", early_smt_enabled);
 #define check_smt_enabled()
 #endif /* CONFIG_SMP */
 
+/** Fix up paca fields required for the boot cpu */
+static void fixup_boot_paca(void)
+{
+	/* The boot cpu is started */
+	get_paca()->cpu_start = 1;
+	/* Allow percpu accesses to work until we setup percpu data */
+	get_paca()->data_offset = 0;
+}
+
 /*
  * Early initialization entry point. This is called by head.S
  * with MMU translation disabled. We rely on the "feature" of
@@ -174,6 +185,8 @@ early_param("smt-enabled", early_smt_enabled);
 
 void __init early_setup(unsigned long dt_ptr)
 {
+	static __initdata struct paca_struct boot_paca;
+
 	/* -------- printk is _NOT_ safe to use here ! ------- */
 
 	/* Identify CPU type */
@@ -182,6 +195,7 @@ void __init early_setup(unsigned long dt_ptr)
 	/* Assume we're on cpu 0 for now. Don't write to the paca yet! */
 	initialise_paca(&boot_paca, 0);
 	setup_paca(&boot_paca);
+	fixup_boot_paca();
 
 	/* Initialize lockdep early or else spinlocks will blow */
 	lockdep_init();
@@ -200,11 +214,11 @@ void __init early_setup(unsigned long dt_ptr)
 	 */
 	early_init_devtree(__va(dt_ptr));
 
+	epapr_paravirt_early_init();
+
 	/* Now we know the logical id of our boot cpu, setup the paca. */
 	setup_paca(&paca[boot_cpuid]);
-
-	/* Fix up paca fields required for the boot cpu */
-	get_paca()->cpu_start = 1;
+	fixup_boot_paca();
 
 	/* Probe the machine type */
 	probe_machine();
@@ -216,7 +230,28 @@ void __init early_setup(unsigned long dt_ptr)
 	/* Initialize the hash table or TLB handling */
 	early_init_mmu();
 
+	kvm_cma_reserve();
+
+	/*
+	 * Reserve any gigantic pages requested on the command line.
+	 * memblock needs to have been initialized by the time this is
+	 * called since this will reserve memory.
+	 */
+	reserve_hugetlb_gpages();
+
 	DBG(" <- early_setup()\n");
+
+#ifdef CONFIG_PPC_EARLY_DEBUG_BOOTX
+	/*
+	 * This needs to be done *last* (after the above DBG() even)
+	 *
+	 * Right after we return from this function, we turn on the MMU
+	 * which means the real-mode access trick that btext does will
+	 * no longer work, it needs to switch to using a real MMU
+	 * mapping. This call will ensure that it does
+	 */
+	btext_map();
+#endif /* CONFIG_PPC_EARLY_DEBUG_BOOTX */
 }
 
 #ifdef CONFIG_SMP
@@ -253,11 +288,11 @@ void smp_release_cpus(void)
 	for (i = 0; i < 100000; i++) {
 		mb();
 		HMT_low();
-		if (boot_cpu_count == 0)
+		if (spinning_secondaries == 0)
 			break;
 		udelay(1);
 	}
-	DBG("boot_cpu_count = %d\n", boot_cpu_count);
+	DBG("spinning_secondaries = %d\n", spinning_secondaries);
 
 	DBG(" <- smp_release_cpus()\n");
 }
@@ -277,29 +312,32 @@ static void __init initialize_cache_info(void)
 
 	DBG(" -> initialize_cache_info()\n");
 
-	for (np = NULL; (np = of_find_node_by_type(np, "cpu"));) {
+	for_each_node_by_type(np, "cpu") {
 		num_cpus += 1;
 
-		/* We're assuming *all* of the CPUs have the same
+		/*
+		 * We're assuming *all* of the CPUs have the same
 		 * d-cache and i-cache sizes... -Peter
 		 */
-
-		if ( num_cpus == 1 ) {
-			const u32 *sizep, *lsizep;
+		if (num_cpus == 1) {
+			const __be32 *sizep, *lsizep;
 			u32 size, lsize;
 
 			size = 0;
 			lsize = cur_cpu_spec->dcache_bsize;
 			sizep = of_get_property(np, "d-cache-size", NULL);
 			if (sizep != NULL)
-				size = *sizep;
-			lsizep = of_get_property(np, "d-cache-block-size", NULL);
+				size = be32_to_cpu(*sizep);
+			lsizep = of_get_property(np, "d-cache-block-size",
+						 NULL);
 			/* fallback if block size missing */
 			if (lsizep == NULL)
-				lsizep = of_get_property(np, "d-cache-line-size", NULL);
+				lsizep = of_get_property(np,
+							 "d-cache-line-size",
+							 NULL);
 			if (lsizep != NULL)
-				lsize = *lsizep;
-			if (sizep == 0 || lsizep == 0)
+				lsize = be32_to_cpu(*lsizep);
+			if (sizep == NULL || lsizep == NULL)
 				DBG("Argh, can't find dcache properties ! "
 				    "sizep: %p, lsizep: %p\n", sizep, lsizep);
 
@@ -312,13 +350,16 @@ static void __init initialize_cache_info(void)
 			lsize = cur_cpu_spec->icache_bsize;
 			sizep = of_get_property(np, "i-cache-size", NULL);
 			if (sizep != NULL)
-				size = *sizep;
-			lsizep = of_get_property(np, "i-cache-block-size", NULL);
+				size = be32_to_cpu(*sizep);
+			lsizep = of_get_property(np, "i-cache-block-size",
+						 NULL);
 			if (lsizep == NULL)
-				lsizep = of_get_property(np, "i-cache-line-size", NULL);
+				lsizep = of_get_property(np,
+							 "i-cache-line-size",
+							 NULL);
 			if (lsizep != NULL)
-				lsize = *lsizep;
-			if (sizep == 0 || lsizep == 0)
+				lsize = be32_to_cpu(*lsizep);
+			if (sizep == NULL || lsizep == NULL)
 				DBG("Argh, can't find icache properties ! "
 				    "sizep: %p, lsizep: %p\n", sizep, lsizep);
 
@@ -557,7 +598,9 @@ void __init setup_arch(char **cmdline_p)
 	init_mm.end_code = (unsigned long) _etext;
 	init_mm.end_data = (unsigned long) _edata;
 	init_mm.brk = klimit;
-	
+#ifdef CONFIG_PPC_64K_PAGES
+	init_mm.context.pte_frag = NULL;
+#endif
 	irqstack_early_init();
 	exc_lvl_early_init();
 	emergency_stack_init();
@@ -580,6 +623,11 @@ void __init setup_arch(char **cmdline_p)
 
 	/* Initialize the MMU context management stuff */
 	mmu_context_init();
+
+	/* Interrupt code needs to be 64K-aligned */
+	if ((unsigned long)_stext & 0xffff)
+		panic("Kernelbase not 64K-aligned (0x%lx)!\n",
+		      (unsigned long)_stext);
 
 	ppc64_boot_msg(0x15, "Setup Done");
 }
@@ -666,8 +714,7 @@ void __init setup_per_cpu_areas(void)
 #endif
 
 
-#ifdef CONFIG_PPC_INDIRECT_IO
+#if defined(CONFIG_PPC_INDIRECT_PIO) || defined(CONFIG_PPC_INDIRECT_MMIO)
 struct ppc_pci_io ppc_pci_io;
 EXPORT_SYMBOL(ppc_pci_io);
-#endif /* CONFIG_PPC_INDIRECT_IO */
-
+#endif
